@@ -1,0 +1,405 @@
+
+analysis_dir <- "C:/Users/mrzsjs1/Desktop/Addiction/analysis"
+out_dir      <- file.path(analysis_dir, "figures")
+per_dir      <- file.path(out_dir, "per_drug")
+
+LINES <- c("KNS-42" = "KNS", "SVG-A" = "SVG")          # cell line -> filename prefix
+DRUGS <- c(ethanol = "ethanol", THC = "thc", cocaine = "cocaine",
+           morphine = "morphine", psilocin = "psilocin")
+
+# column aliases (matched case-insensitively)
+ID_ALIASES   <- c("ensembl_transcript_ID_version","ENSEMBL_TRANSCRIPT","ensembl_transcript",
+                  "transcript_id","target_id","...1","X")
+LFC_ALIASES  <- c("log2FoldChange","log2FC","log2fc","logFC","log2_fold_change")
+PADJ_ALIASES <- c("padj","padj_BH","adj.P.Val","FDR","p_adj","qvalue")
+
+# significance rule — SINGLE SOURCE OF TRUTH
+PADJ <- 0.05; LFC <- 1
+STRIP_VERSION <- FALSE   # set TRUE if one cell line has ENST versions and the other doesn't
+
+Y_CAP <- 60              # volcano -log10(padj) display cap (NA = none)
+
+# palette
+COL_UP <- "#E24B4A"; COL_DOWN <- "#378ADD"; COL_NS <- "#B4B2A9"
+COL_CONC <- "#1D9E75"; COL_DISC <- "#E24B4A"
+VENN2_COLS <- c("#1D9E75", "#7F77DD")                   # KNS teal / SVG purple
+DRUG_COLS  <- c(ethanol = "#E69F00", THC = "#1D9E75", cocaine = "#378ADD",
+                morphine = "#E24B4A", psilocin = "#7F77DD")
+
+# proteomics
+CELL_LINE <- "KNS-42"; PROT_FILL <- "#1D9E75"; SHOW_TIERS <- TRUE; TIER_SIZE <- 3.0
+## ========================================================================= ##
+
+## --- packages --------------------------------------------------------------
+pkgs <- c("readr","dplyr","tidyr","ggplot2","scales","patchwork","ggVennDiagram","ComplexUpset")
+missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing)) install.packages(missing)
+suppressPackageStartupMessages({
+  library(readr); library(dplyr); library(tidyr); library(ggplot2); library(scales)
+  library(patchwork); library(ggVennDiagram); library(ComplexUpset)
+})
+dir.create(per_dir, showWarnings = FALSE, recursive = TRUE)
+thr_lab <- sprintf("padj < %.2g & |log2FC| > %g", PADJ, LFC)
+
+## --- ONE shared theme ------------------------------------------------------
+BASE_SIZE <- 15
+theme_pub <- theme_classic(base_size = BASE_SIZE) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 17),
+        axis.title = element_text(size = 15),
+        axis.text  = element_text(colour = "grey20", size = 13),
+        strip.text = element_text(face = "bold", size = 14),
+        strip.background = element_rect(fill = "grey95", colour = NA),
+        plot.caption = element_text(size = 11, colour = "grey40", hjust = 0),
+        legend.position = "bottom", legend.title = element_blank(),
+        legend.text = element_text(size = 13),
+        plot.margin = margin(10, 12, 8, 8))
+
+
+###############################################################################
+## ============================ A. PROTEOMICS ============================== ##
+###############################################################################
+prot <- data.frame(
+  gene_name = c("VIM","LGALS3BP","GFAP","PEA15","GAP43","SLC1A3",
+                "AQP4","GJA1","GSS","SLC1A2","NOTCH1"),
+  log10_abundance = c(8.641224791,6.244483122,6.932189985,6.218629496,6.100859465,
+                      5.674796821,5.607878246,5.550693136,5.427245577,5.261796419,4.681234142),
+  expression_level = c("Very High","Very High","Very High","Very High","Very High",
+                       "High","High","High","High","High","Medium"),
+  stringsAsFactors = FALSE) %>%
+  arrange(desc(log10_abundance)) %>%
+  mutate(gene_name = factor(gene_name, levels = gene_name),
+         expression_level = factor(expression_level, levels = c("Very High","High","Medium")))
+y_bot <- 4; y_top <- ceiling(max(prot$log10_abundance))
+theme_prot <- theme_pub +
+  theme(axis.title.y = element_text(face = "italic"),
+        axis.text.x  = element_text(angle = 45, hjust = 1, face = "italic", size = 13),
+        legend.position = "none")
+tier_layer <- list()
+if (SHOW_TIERS) {
+  tiers <- prot %>% mutate(idx = as.integer(gene_name)) %>%
+    group_by(expression_level) %>%
+    summarise(x1 = min(idx)-0.4, x2 = max(idx)+0.4, .groups = "drop") %>%
+    mutate(xmid = (x1+x2)/2)
+  ybr <- y_top + 0.22
+  tier_layer <- list(
+    geom_segment(data = tiers, aes(x = x1, xend = x2, y = ybr, yend = ybr),
+                 inherit.aes = FALSE, colour = "grey60", linewidth = 0.35),
+    geom_text(data = tiers, aes(x = xmid, y = ybr + 0.12, label = expression_level),
+              inherit.aes = FALSE, size = TIER_SIZE, colour = "grey45", fontface = "italic"))
+  y_top <- y_top + 0.55
+}
+p_prot <- ggplot(prot, aes(gene_name, log10_abundance)) +
+  geom_col(fill = PROT_FILL, colour = "grey20", linewidth = 0.3, width = 0.74) +
+  tier_layer +
+  scale_y_continuous(breaks = seq(y_bot, ceiling(max(prot$log10_abundance)), 1),
+                     labels = function(b) parse(text = paste0("10^", b)),
+                     expand = expansion(mult = c(0, 0.02)),
+                     limits = c(y_bot, y_top), oob = scales::squish) +
+  labs(title = sprintf("Astrocyte marker expression (%s baseline proteome)", CELL_LINE),
+       x = "Astrocyte markers",
+       y = expression(atop("Protein expression","(" * Log[10] * " mean abundance)")),
+       caption = "Mean protein abundance (log10 scale), markers ranked by descending abundance.") +
+  theme_prot
+ggsave(file.path(out_dir, "Fig_proteomics_markers.pdf"), p_prot, width = 6.6, height = 5.0, device = cairo_pdf)
+ggsave(file.path(out_dir, "Fig_proteomics_markers.png"), p_prot, width = 6.6, height = 5.0, dpi = 600)
+message("A. proteomics figure written.")
+
+
+###############################################################################
+## ===================== READ ALL FULL RESULTS (CSV) ====================== ##
+###############################################################################
+pick <- function(aliases, nm, label) {
+  hit <- nm[tolower(nm) %in% tolower(aliases)]
+  if (!length(hit)) stop("[", label, "] no column among: ", paste(aliases, collapse=", "),
+                         "\n  file has: ", paste(nm, collapse=", "))
+  hit[1]
+}
+find_file <- function(line_key, drug_key) {
+  f <- list.files(analysis_dir, pattern = "\\.csv$", full.names = TRUE)
+  hit <- f[grepl(paste0("(^|[^A-Za-z])", line_key), basename(f), ignore.case = TRUE) &
+             grepl(drug_key, basename(f), ignore.case = TRUE)]
+  if (length(hit)) hit[1] else NA_character_
+}
+read_full <- function(line, drug) {
+  fp <- find_file(LINES[[line]], DRUGS[[drug]])
+  if (is.na(fp)) { warning("missing file: ", line, " / ", drug); return(NULL) }
+  df <- readr::read_csv(fp, show_col_types = FALSE); nm <- names(df); lab <- paste(line, drug)
+  cid <- pick(ID_ALIASES, nm, lab); clf <- pick(LFC_ALIASES, nm, lab); cpj <- pick(PADJ_ALIASES, nm, lab)
+  d <- df %>% transmute(id = as.character(.data[[cid]]),
+                        lfc = as.numeric(.data[[clf]]),
+                        padj = as.numeric(.data[[cpj]])) %>%
+    filter(!is.na(id), !is.na(lfc), !is.na(padj))
+  if (STRIP_VERSION) d$id <- sub("\\..*$", "", d$id)
+  d$drug <- drug; d$line <- line
+  d$sig <- d$padj < PADJ & abs(d$lfc) > LFC
+  d$cls <- ifelse(!d$sig, "ns", ifelse(d$lfc > 0, "up", "down"))
+  message("  read ", lab, ": ", nrow(d), " tested, ", sum(d$sig), " DETs  <- ", basename(fp))
+  d
+}
+ALL <- list()
+for (ln in names(LINES)) for (dg in names(DRUGS)) {
+  d <- read_full(ln, dg); if (!is.null(d)) ALL[[paste(ln, dg)]] <- d
+}
+ALL <- bind_rows(ALL)
+if (!nrow(ALL)) stop("No CSVs read — check analysis_dir and filename keywords.")
+ALL <- ALL %>% mutate(drug = factor(drug, levels = names(DRUGS)),
+                      line = factor(line, levels = names(LINES)))
+
+# significant sets nested: SETS[[line]][[drug]] = data frame
+SETS <- list()
+for (ln in names(LINES)) for (dg in names(DRUGS)) {
+  s <- ALL %>% filter(line == ln, drug == dg, sig)
+  if (nrow(s)) SETS[[ln]][[dg]] <- s
+}
+
+
+###############################################################################
+## ============================ B. VOLCANOES =============================== ##
+###############################################################################
+x_lim <- c(floor(min(ALL$lfc)), ceiling(max(ALL$lfc)))
+true_y_max <- max(-log10(ALL$padj), na.rm = TRUE)
+y_disp <- if (is.na(Y_CAP)) ceiling(true_y_max) else Y_CAP
+counts <- ALL %>% filter(sig) %>% group_by(drug, line) %>%
+  summarise(n_up = sum(lfc > 0), n_dn = sum(lfc < 0), .groups = "drop")
+ALLv <- ALL %>% mutate(y = pmin(-log10(padj), y_disp),
+                       capped = -log10(padj) > y_disp,
+                       cls = factor(cls, levels = c("ns","down","up")))
+volcano_layer <- function() list(
+  geom_hline(yintercept = -log10(PADJ), linetype = "dashed", colour = "grey55", linewidth = 0.3),
+  geom_vline(xintercept = c(-LFC, LFC), linetype = "dashed", colour = "grey55", linewidth = 0.3),
+  geom_point(aes(colour = cls, shape = capped), size = 0.8, alpha = 0.6),
+  scale_colour_manual(values = c(ns = COL_NS, down = COL_DOWN, up = COL_UP),
+                      labels = c(ns="NS", down="Down", up="Up"), breaks = c("up","down","ns")),
+  scale_shape_manual(values = c(`FALSE`=16, `TRUE`=2), guide = "none"),
+  coord_cartesian(xlim = x_lim, ylim = c(0, y_disp)),
+  labs(x = expression(log[2]~fold-change), y = expression(-log[10]~adjusted~italic(p)))
+)
+p_vol_all <- ggplot(ALLv, aes(lfc, y)) + volcano_layer() +
+  geom_text(data = counts, aes(x = x_lim[1], y = y_disp,
+                               label = sprintf("up %s\ndown %s", comma(n_up), comma(n_dn))),
+            inherit.aes = FALSE, hjust = 0, vjust = 1, size = 3.4, colour = "grey25") +
+  facet_grid(line ~ drug) +
+  labs(title = "Transcriptional response by drug and cell line",
+       caption = sprintf("%s. Shared axes; y capped at %g (open triangles); true max = %.0f.",
+                         thr_lab, y_disp, true_y_max)) +
+  theme_pub
+ggsave(file.path(out_dir, "Fig_ALL_volcanoes.pdf"), p_vol_all,
+       width = 4 + 2.6*nlevels(ALL$drug), height = 8.5, device = cairo_pdf, limitsize = FALSE)
+ggsave(file.path(out_dir, "Fig_ALL_volcanoes.png"), p_vol_all,
+       width = 4 + 2.6*nlevels(ALL$drug), height = 8.5, dpi = 600, limitsize = FALSE)
+for (dg in levels(ALL$drug)) {
+  sub <- ALLv %>% filter(drug == dg); if (!nrow(sub)) next
+  cc <- counts %>% filter(drug == dg)
+  p <- ggplot(sub, aes(lfc, y)) + volcano_layer() +
+    geom_text(data = cc, aes(x = x_lim[1], y = y_disp,
+                             label = sprintf("up %s\ndown %s", comma(n_up), comma(n_dn))),
+              inherit.aes = FALSE, hjust = 0, vjust = 1, size = 3.8, colour = "grey25") +
+    facet_wrap(~ line) +
+    labs(title = sprintf("%s vs control", dg),
+         caption = sprintf("%s. y capped at %g; true max = %.0f.", thr_lab, y_disp, true_y_max)) +
+    theme_pub
+  ggsave(file.path(per_dir, sprintf("Fig_%s_volcano.pdf", dg)), p, width = 9, height = 5.0, device = cairo_pdf)
+  ggsave(file.path(per_dir, sprintf("Fig_%s_volcano.png", dg)), p, width = 9, height = 5.0, dpi = 600)
+}
+message("B. volcano figures written.")
+
+
+###############################################################################
+## ===== C. 2-set Venn (KNS vs SVG per drug) + D. UpSet/5-set per line ===== ##
+###############################################################################
+make_venn2 <- function(setK, setS, ttl) {
+  nK <- length(setdiff(setK, setS)); nS <- length(setdiff(setS, setK)); nB <- length(intersect(setK, setS))
+  r <- 1.0; off <- 0.62; th <- seq(0, 2*pi, length.out = 200)
+  circ <- function(cx, s) data.frame(x = cx + r*cos(th), y = r*sin(th), set = s)
+  circles <- rbind(circ(-off, "KNS-42"), circ(off, "SVG-A"))
+  ggplot() +
+    geom_polygon(data = circles, aes(x, y, group = set, fill = set), alpha = 0.45, colour = NA) +
+    geom_path(data = circles, aes(x, y, group = set, colour = set), linewidth = 0.7) +
+    scale_fill_manual(values = setNames(VENN2_COLS, c("KNS-42","SVG-A")), guide = "none") +
+    scale_colour_manual(values = setNames(VENN2_COLS, c("KNS-42","SVG-A")), guide = "none") +
+    annotate("text", x = -off-0.45, y = 0, label = comma(nK), size = 6) +
+    annotate("text", x =  off+0.45, y = 0, label = comma(nS), size = 6) +
+    annotate("text", x = 0,         y = 0, label = comma(nB), size = 6) +
+    annotate("text", x = -off, y = r+0.18, label = "KNS-42", size = 5, fontface = "bold", colour = VENN2_COLS[1]) +
+    annotate("text", x =  off, y = r+0.18, label = "SVG-A",  size = 5, fontface = "bold", colour = VENN2_COLS[2]) +
+    labs(title = ttl) + coord_equal(clip = "off") +
+    theme_void(base_size = 14) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 15), plot.margin = margin(16,8,6,8))
+}
+venn2_list <- list(); summ <- list()
+for (dg in names(DRUGS)) {
+  sk <- SETS[["KNS-42"]][[dg]]$id; ss <- SETS[["SVG-A"]][[dg]]$id
+  if (is.null(sk) || is.null(ss)) next
+  p <- make_venn2(sk, ss, dg)
+  ggsave(file.path(per_dir, sprintf("Fig_%s_venn2.png", dg)), p, width = 5, height = 5, dpi = 600)
+  venn2_list[[dg]] <- p
+  summ[[dg]] <- data.frame(drug = dg, KNS_DETs = length(sk), SVG_DETs = length(ss),
+                           shared = length(intersect(sk, ss)))
+}
+if (length(venn2_list)) {
+  pv <- wrap_plots(venn2_list, nrow = 1) +
+    plot_annotation(title = "DET overlap between cell lines, by drug",
+                    caption = sprintf("%s. KNS-42 = teal (left), SVG-A = purple (right).", thr_lab),
+                    theme = theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 17),
+                                  plot.caption = element_text(size = 11, colour = "grey40")))
+  ggsave(file.path(out_dir, "Fig_venn2_ALL.pdf"), pv, width = 4.6*length(venn2_list), height = 5.2, device = cairo_pdf, limitsize = FALSE)
+  ggsave(file.path(out_dir, "Fig_venn2_ALL.png"), pv, width = 4.6*length(venn2_list), height = 5.2, dpi = 600, limitsize = FALSE)
+}
+message("C. cross-line 2-set Venns written.")
+
+## D. per cell line: UpSet + 5-set Venn
+for (ln in names(SETS)) {
+  drug_sets <- lapply(SETS[[ln]], function(d) d$id)
+  if (length(drug_sets) < 2) next
+  tag <- gsub("[^A-Za-z0-9]", "", ln)
+  ## UpSet
+  all_ids <- unique(unlist(drug_sets))
+  memb <- as.data.frame(sapply(drug_sets, function(s) all_ids %in% s)); memb$id <- all_ids
+  up <- ComplexUpset::upset(memb, intersect = names(drug_sets), min_size = 1,
+                            sort_intersections_by = "cardinality",
+                            base_annotations = list('Intersection size' =
+                                                      ComplexUpset::intersection_size(text = list(size = 3.5)))) +
+    labs(title = sprintf("%s — DET overlap across drugs (%s)", ln, thr_lab))
+  ggsave(file.path(out_dir, sprintf("Fig_upset_%s.pdf", tag)), up, width = 10, height = 6, device = cairo_pdf)
+  ggsave(file.path(out_dir, sprintf("Fig_upset_%s.png", tag)), up, width = 10, height = 6, dpi = 600)
+  ## 5-set Venn
+  v <- ggVennDiagram::ggVennDiagram(drug_sets, label = "count", label_alpha = 0, edge_size = 0.4) +
+    scale_fill_gradient(low = "#F7FBFF", high = "#7F77DD", name = "DETs") +
+    scale_x_continuous(expand = expansion(mult = 0.12)) +
+    labs(title = sprintf("%s — shared DETs across drugs", ln)) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 16), legend.position = "right")
+  ggsave(file.path(out_dir, sprintf("Fig_venn5_%s.pdf", tag)), v, width = 7.5, height = 6.5, device = cairo_pdf)
+  ggsave(file.path(out_dir, sprintf("Fig_venn5_%s.png", tag)), v, width = 7.5, height = 6.5, dpi = 600)
+}
+message("D. per-cell-line UpSet + 5-set Venns written.")
+
+
+###############################################################################
+## ============================ E. CONCORDANCE ============================= ##
+###############################################################################
+conc_plots <- list(); conc_stats <- list()
+for (dg in names(DRUGS)) {
+  kk <- SETS[["KNS-42"]][[dg]]; ss <- SETS[["SVG-A"]][[dg]]
+  if (is.null(kk) || is.null(ss)) next
+  mg <- inner_join(kk %>% select(id, lfc_A = lfc), ss %>% select(id, lfc_B = lfc), by = "id") %>%
+    mutate(dir = ifelse(sign(lfc_A) == sign(lfc_B), "Concordant", "Discordant"))
+  if (!nrow(mg)) next
+  n_t <- nrow(mg); n_c <- sum(mg$dir == "Concordant")
+  pr <- if (n_t > 2) cor(mg$lfc_A, mg$lfc_B) else NA_real_
+  axm <- max(abs(c(mg$lfc_A, mg$lfc_B)))
+  psc <- ggplot(mg, aes(lfc_A, lfc_B, colour = dir)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.3) +
+    geom_hline(yintercept = 0, colour = "grey80", linewidth = 0.3) +
+    geom_vline(xintercept = 0, colour = "grey80", linewidth = 0.3) +
+    geom_point(size = 1.7, alpha = 0.8) +
+    scale_colour_manual(values = c(Concordant = COL_CONC, Discordant = COL_DISC)) +
+    coord_equal(xlim = c(-axm, axm), ylim = c(-axm, axm)) +
+    labs(title = sprintf("%s: shared transcript log2FC", dg),
+         x = "log2FC  KNS-42", y = "log2FC  SVG-A",
+         caption = sprintf("%s shared. Same dir: %s (%.0f%%). r = %s.",
+                           comma(n_t), comma(n_c), 100*n_c/n_t,
+                           ifelse(is.na(pr), "NA", formatC(pr, format="f", digits=2)))) +
+    theme_pub
+  ggsave(file.path(per_dir, sprintf("Fig_%s_concordance.png", dg)), psc, width = 5.6, height = 5.6, dpi = 600)
+  conc_plots[[dg]] <- psc + labs(caption = NULL)
+  conc_stats[[dg]] <- data.frame(drug = dg, shared = n_t, pct_concordant = round(100*n_c/n_t,1),
+                                 pearson_r = ifelse(is.na(pr), NA, round(pr,3)))
+}
+if (length(conc_plots)) {
+  pc <- wrap_plots(conc_plots, nrow = 1) +
+    plot_annotation(title = "Shared-transcript concordance (KNS-42 vs SVG-A) by drug",
+                    caption = sprintf("%s. Dashed line = y = x.", thr_lab),
+                    theme = theme(plot.title = element_text(face="bold", hjust=0.5, size=17),
+                                  plot.caption = element_text(size=11, colour="grey40"))) & theme(legend.position = "bottom")
+  ggsave(file.path(out_dir, "Fig_ALL_concordance.pdf"), pc, width = 5.2*length(conc_plots), height = 5.6, device = cairo_pdf, limitsize = FALSE)
+  ggsave(file.path(out_dir, "Fig_ALL_concordance.png"), pc, width = 5.2*length(conc_plots), height = 5.6, dpi = 600, limitsize = FALSE)
+}
+message("E. concordance figures written.")
+
+
+###############################################################################
+## ================ F. DRUG-vs-DRUG COMPARISON (per cell line) ============= ##
+##  Union of DETs across the 5 drugs = consistent transcript set per line.
+##  Then: (1) correlation heatmap of pairwise log2FC, (2) pairwise scatter grid.
+###############################################################################
+for (ln in names(LINES)) {
+  dat <- ALL %>% filter(line == ln)
+  if (!nrow(dat)) next
+  tag <- gsub("[^A-Za-z0-9]", "", ln)
+  
+  # union of DETs across drugs in this line
+  union_ids <- dat %>% filter(sig) %>% pull(id) %>% unique()
+  if (length(union_ids) < 3) { message("  ", ln, ": too few union DETs, skipped."); next }
+  
+  # wide matrix: rows = union transcripts, cols = drugs, values = log2FC
+  wide <- dat %>% filter(id %in% union_ids) %>%
+    select(id, drug, lfc) %>%
+    tidyr::pivot_wider(names_from = drug, values_from = lfc) %>%
+    as.data.frame()
+  rownames(wide) <- wide$id; wide$id <- NULL
+  drugs_present <- intersect(names(DRUGS), colnames(wide))
+  wide <- wide[, drugs_present, drop = FALSE]
+  
+  ## --- (1) correlation heatmap (pairwise Pearson r on log2FC) ---
+  cm <- cor(wide, use = "pairwise.complete.obs")
+  cm_df <- as.data.frame(as.table(cm)); names(cm_df) <- c("d1","d2","r")
+  cm_df$d1 <- factor(cm_df$d1, levels = drugs_present)
+  cm_df$d2 <- factor(cm_df$d2, levels = rev(drugs_present))
+  p_hm <- ggplot(cm_df, aes(d1, d2, fill = r)) +
+    geom_tile(colour = "white", linewidth = 1) +
+    geom_text(aes(label = formatC(r, format = "f", digits = 2)), size = 4.5) +
+    scale_fill_gradient2(low = COL_DOWN, mid = "white", high = COL_UP,
+                         midpoint = 0, limits = c(-1, 1), name = "Pearson r") +
+    coord_equal() +
+    labs(title = sprintf("%s — drug-vs-drug log2FC correlation", ln),
+         x = NULL, y = NULL,
+         caption = sprintf("Union of DETs across drugs (%s); n = %s transcripts.",
+                           thr_lab, comma(length(union_ids)))) +
+    theme_pub +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "right",
+          legend.title = element_text(size = 12), panel.grid = element_blank())
+  ggsave(file.path(out_dir, sprintf("Fig_drugcor_heatmap_%s.pdf", tag)), p_hm, width = 6.8, height = 6.2, device = cairo_pdf)
+  ggsave(file.path(out_dir, sprintf("Fig_drugcor_heatmap_%s.png", tag)), p_hm, width = 6.8, height = 6.2, dpi = 600)
+  
+  ## --- (2) pairwise scatter grid (all drug pairs) ---
+  combs <- t(combn(drugs_present, 2))
+  axm <- max(abs(as.matrix(wide)), na.rm = TRUE)
+  panels <- list()
+  for (i in seq_len(nrow(combs))) {
+    a <- combs[i,1]; b <- combs[i,2]
+    sub <- data.frame(x = wide[[a]], y = wide[[b]])
+    sub <- sub[stats::complete.cases(sub), , drop = FALSE]
+    rr <- if (nrow(sub) > 2) cor(sub$x, sub$y) else NA_real_
+    panels[[paste(a,b)]] <- ggplot(sub, aes(x, y)) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60", linewidth = 0.3) +
+      geom_hline(yintercept = 0, colour = "grey85", linewidth = 0.25) +
+      geom_vline(xintercept = 0, colour = "grey85", linewidth = 0.25) +
+      geom_point(size = 0.8, alpha = 0.4, colour = COL_DOWN) +
+      coord_equal(xlim = c(-axm, axm), ylim = c(-axm, axm)) +
+      labs(x = a, y = b,
+           title = sprintf("r = %s", ifelse(is.na(rr), "NA", formatC(rr, format="f", digits=2)))) +
+      theme_pub +
+      theme(plot.title = element_text(size = 12, face = "plain", hjust = 0.5),
+            axis.title = element_text(size = 11), legend.position = "none")
+  }
+  pg <- wrap_plots(panels, ncol = 5) +
+    plot_annotation(title = sprintf("%s — pairwise drug log2FC comparison", ln),
+                    caption = sprintf("Union of DETs across drugs (%s); dashed line = y = x.", thr_lab),
+                    theme = theme(plot.title = element_text(face="bold", hjust=0.5, size=17),
+                                  plot.caption = element_text(size=11, colour="grey40")))
+  ggsave(file.path(out_dir, sprintf("Fig_drugpairs_%s.pdf", tag)), pg, width = 18, height = 8, device = cairo_pdf, limitsize = FALSE)
+  ggsave(file.path(out_dir, sprintf("Fig_drugpairs_%s.png", tag)), pg, width = 18, height = 8, dpi = 500, limitsize = FALSE)
+  message("F. ", ln, ": drug-correlation heatmap + pairwise grid written (", length(union_ids), " union DETs).")
+}
+
+
+###############################################################################
+## ============================ SUMMARY ==================================== ##
+###############################################################################
+if (length(summ)) {
+  st <- bind_rows(summ)
+  if (length(conc_stats)) st <- left_join(st, bind_rows(conc_stats) %>% select(-shared), by = "drug")
+  write_csv(st, file.path(out_dir, "DET_summary_all_drugs.csv"))
+  message("\nSummary:"); print(st, row.names = FALSE)
+}
+message("\nDONE. Figures in: ", out_dir, "  (per-drug in: ", per_dir, ")")
