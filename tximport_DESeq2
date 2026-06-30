@@ -1,0 +1,109 @@
+## ============================ LIBRARIES ============================ ##
+suppressPackageStartupMessages({
+  library(tximport)
+  library(DESeq2)
+  library(dplyr)
+  library(tibble)
+  library(readr)
+})
+
+## ============================ SETTINGS ============================ ##
+root <- "C:/Users/mrzsjs1/Desktop/Addiction/KNS42data"
+
+DRUGS <- c("psilocin", "morphine", "cocaine", "ethanol", "THC")
+
+SAMPLE_TABLE <- "sampleData2.txt"
+CONTROL_LABEL <- "Control"
+
+out_dir <- file.path("C:/Users/mrzsjs1/Desktop/Addiction/KNS42data/analysis")
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+## ======================= MAIN FUNCTION ============================ ##
+run_drug <- function(drug) {
+  
+  message("\n================ ", drug, " ================")
+  
+  dd <- file.path(root, drug)
+  if (!dir.exists(dd)) {
+    warning("Missing folder: ", dd)
+    return(NULL)
+  }
+  
+  ## ---------------- sample table ---------------- ##
+  st <- read.csv(file.path(dd, SAMPLE_TABLE))
+  
+  if (!"sample_names" %in% names(st)) {
+    stop("[", drug, "] missing 'sample_names' column")
+  }
+  
+  cond_col <- setdiff(names(st), "sample_names")[1]
+  if (is.na(cond_col)) stop("[", drug, "] no condition column found")
+  
+  st$condition <- factor(st[[cond_col]])
+  
+  if (CONTROL_LABEL %in% levels(st$condition)) {
+    st$condition <- relevel(st$condition, ref = CONTROL_LABEL)
+  } else {
+    warning("[", drug, "] Control not found in conditions: ",
+            paste(levels(st$condition), collapse = ", "))
+  }
+  
+  message("Conditions: ", paste(levels(st$condition), collapse = " | "))
+  
+  ## ---------------- KALLISTO IMPORT (TRANSCRIPT LEVEL) ---------------- ##
+  files <- file.path(dd, st$sample_names, "abundance.h5")
+  names(files) <- st$sample_names
+  
+  if (!all(file.exists(files))) {
+    stop("[", drug, "] missing abundance.h5 for: ",
+         paste(st$sample_names[!file.exists(files)], collapse = ", "))
+  }
+  
+  txi <- tximport(files,
+                  type = "kallisto",
+                  txOut = TRUE)   # IMPORTANT: transcript-level mode
+  
+  ## ---------------- DESEQ2 ---------------- ##
+  dds <- DESeqDataSetFromTximport(
+    txi,
+    colData = st,
+    design = ~ condition
+  )
+  
+  dds <- DESeq(dds)
+  
+  res <- results(dds)
+  
+  message("DESeq2 complete. Transcripts tested: ", nrow(res))
+  
+  ## ---------------- FORMAT RESULTS ---------------- ##
+  res_df <- as.data.frame(res) %>%
+    rownames_to_column("ENSEMBL_TRANSCRIPT") %>%
+    filter(!is.na(padj))
+  
+  res_df$significant <- with(res_df,
+                             padj < 0.05 & abs(log2FoldChange) > 1)
+  
+  ## ---------------- WRITE OUTPUT ---------------- ##
+  out_file <- file.path(out_dir,
+                        paste0(drug, "_DESeq2_transcript_results.csv"))
+  
+  write_csv(res_df, out_file)
+  
+  message("Wrote: ", out_file)
+  message("Significant transcripts: ", sum(res_df$significant))
+  
+  invisible(res_df)
+}
+
+## ============================ RUN ALL ============================= ##
+for (d in DRUGS) {
+  tryCatch(
+    run_drug(d),
+    error = function(e) {
+      message("SKIPPED ", d, ": ", conditionMessage(e))
+    }
+  )
+}
+
+message("\nDONE. Transcript-level results in: ", out_dir)
