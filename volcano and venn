@@ -1,21 +1,4 @@
-###############################################################################
-##  MULTI-OMICS FIGURE SCRIPT (merged, all figures)
-##  =========================================================================
-##  Reads the rerun FULL DESeq2 results (CSV), applies ONE significance rule,
-##  and produces every figure on a single shared theme:
-##    A. Proteomics: KNS-42 astrocyte-marker abundance
-##    B. Volcanoes: per-drug pair + combined grid (full data -> real NS clouds)
-##    C. 2-set Venn (KNS-42 vs SVG-A) per drug + combined   [fixed labels]
-##    D. Per cell line: UpSet of 5 drugs (recommended) + 5-set Venn
-##    E. Concordance scatter (KNS-42 vs SVG-A log2FC) per drug + combined
-##    + summary CSVs
-##
-##  Files: <LINE>_<drug>_DESeq2_transcript_results.csv  in analysis_dir
-##         e.g. KNS_cocaine_DESeq2_transcript_results.csv
-##  Run:   source(".../multiomics_figures_merged.R")
-###############################################################################
 
-## =============================== SETTINGS ================================= ##
 analysis_dir <- "C:/Users/mrzsjs1/Desktop/Addiction/analysis"
 out_dir      <- file.path(analysis_dir, "figures")
 per_dir      <- file.path(out_dir, "per_drug")
@@ -148,9 +131,14 @@ read_full <- function(line, drug) {
   if (is.na(fp)) { warning("missing file: ", line, " / ", drug); return(NULL) }
   df <- readr::read_csv(fp, show_col_types = FALSE); nm <- names(df); lab <- paste(line, drug)
   cid <- pick(ID_ALIASES, nm, lab); clf <- pick(LFC_ALIASES, nm, lab); cpj <- pick(PADJ_ALIASES, nm, lab)
+  # gene symbol column (optional — enables gene-level overlaps in block G)
+  gene_aliases <- c("gene_symbol","external_gene_name","gene_name","symbol")
+  cgene <- gene_aliases[tolower(gene_aliases) %in% tolower(nm)]
+  cgene <- if (length(cgene)) cgene[1] else NA_character_
   d <- df %>% transmute(id = as.character(.data[[cid]]),
                         lfc = as.numeric(.data[[clf]]),
-                        padj = as.numeric(.data[[cpj]])) %>%
+                        padj = as.numeric(.data[[cpj]]),
+                        gene = if (!is.na(cgene)) toupper(trimws(as.character(.data[[cgene]]))) else NA_character_) %>%
     filter(!is.na(id), !is.na(lfc), !is.na(padj))
   if (STRIP_VERSION) d$id <- sub("\\..*$", "", d$id)
   d$drug <- drug; d$line <- line
@@ -261,7 +249,7 @@ for (dg in names(DRUGS)) {
 }
 if (length(venn2_list)) {
   pv <- wrap_plots(venn2_list, nrow = 1) +
-    plot_annotation(title = "DET overlap between cell lines, by drug",
+    plot_annotation(title = "DET overlap between cell lines, by drug (transcript level)",
                     caption = sprintf("%s. KNS-42 = teal (left), SVG-A = purple (right).", thr_lab),
                     theme = theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 17),
                                   plot.caption = element_text(size = 11, colour = "grey40")))
@@ -285,7 +273,7 @@ for (ln in names(SETS)) {
                               sort_intersections_by = "cardinality",
                               base_annotations = list('Intersection size' =
                                                         ComplexUpset::intersection_size(text = list(size = 3.5)))) +
-      labs(title = sprintf("%s — DET overlap across drugs (%s)", ln, thr_lab))
+      labs(title = sprintf("%s - DET overlap across drugs, transcript level (%s)", ln, thr_lab))
     ggsave(file.path(out_dir, sprintf("Fig_upset_%s.pdf", tag)), up, width = 10, height = 6, device = cairo_pdf)
     ggsave(file.path(out_dir, sprintf("Fig_upset_%s.png", tag)), up, width = 10, height = 6, dpi = 600)
     message("  ", ln, ": UpSet written.")
@@ -296,7 +284,7 @@ for (ln in names(SETS)) {
     v <- ggVennDiagram::ggVennDiagram(drug_sets, label = "count", label_alpha = 0, edge_size = 0.4) +
       scale_fill_gradient(low = "#F7FBFF", high = "#7F77DD", name = "DETs") +
       scale_x_continuous(expand = expansion(mult = 0.12)) +
-      labs(title = sprintf("%s — shared DETs across drugs", ln)) +
+      labs(title = sprintf("%s - shared DETs across drugs (transcript level)", ln)) +
       theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 16), legend.position = "right")
     ggsave(file.path(out_dir, sprintf("Fig_venn5_%s.pdf", tag)), v, width = 7.5, height = 6.5, device = cairo_pdf)
     ggsave(file.path(out_dir, sprintf("Fig_venn5_%s.png", tag)), v, width = 7.5, height = 6.5, dpi = 600)
@@ -339,7 +327,7 @@ for (dg in names(DRUGS)) {
 }
 if (length(conc_plots)) {
   pc <- wrap_plots(conc_plots, nrow = 1) +
-    plot_annotation(title = "Shared-transcript concordance (KNS-42 vs SVG-A) by drug",
+    plot_annotation(title = "Shared-transcript concordance (KNS-42 vs SVG-A) by drug (transcript level)",
                     caption = sprintf("%s. Dashed line = y = x.", thr_lab),
                     theme = theme(plot.title = element_text(face="bold", hjust=0.5, size=17),
                                   plot.caption = element_text(size=11, colour="grey40"))) & theme(legend.position = "bottom")
@@ -384,7 +372,7 @@ for (ln in names(LINES)) {
       scale_fill_gradient2(low = COL_DOWN, mid = "white", high = COL_UP,
                            midpoint = 0, limits = c(-1, 1), name = "Pearson r") +
       coord_equal() +
-      labs(title = sprintf("%s — drug-vs-drug log2FC correlation", ln),
+      labs(title = sprintf("%s - drug-vs-drug log2FC correlation", ln),
            x = NULL, y = NULL,
            caption = sprintf("Union of DETs across drugs (%s); n = %s transcripts.",
                              thr_lab, comma(length(union_ids)))) +
@@ -419,7 +407,7 @@ for (ln in names(LINES)) {
               axis.title = element_text(size = 11), legend.position = "none")
     }
     pg <- wrap_plots(panels, ncol = 5) +
-      plot_annotation(title = sprintf("%s — pairwise drug log2FC comparison", ln),
+      plot_annotation(title = sprintf("%s - pairwise drug log2FC comparison", ln),
                       caption = sprintf("Union of DETs across drugs (%s); dashed line = y = x.", thr_lab),
                       theme = theme(plot.title = element_text(face="bold", hjust=0.5, size=17),
                                     plot.caption = element_text(size=11, colour="grey40")))
@@ -427,6 +415,141 @@ for (ln in names(LINES)) {
     ggsave(file.path(out_dir, sprintf("Fig_drugpairs_%s.png", tag)), pg, width = 18, height = 8, dpi = 500, limitsize = FALSE)
     message("F. ", ln, ": pairwise grid written (", length(union_ids), " union DETs).")
   }, error = function(e) message("  ", ln, ": pairwise grid FAILED — ", conditionMessage(e)))
+}
+
+
+###############################################################################
+## ================ G. GENE-LEVEL OVERLAPS (extra figures) ================= ##
+##  Same appearance as C/D but DETs collapsed to unique gene_symbol.
+##  Cross-line 2-set Venn per drug (+combined), and per-cell-line UpSet/5-set.
+###############################################################################
+if (all(is.na(ALL$gene))) {
+  message("G. SKIPPED — no gene_symbol column in the files. Run the annotation ",
+          "script first so gene-level overlaps can be built.")
+} else {
+  gdir <- file.path(out_dir, "gene_level"); dir.create(gdir, showWarnings = FALSE, recursive = TRUE)
+  
+  # gene-level significant sets: unique genes among DETs, per line/drug
+  gsig <- function(ln, dg) {
+    g <- ALL %>% filter(line == ln, drug == dg, sig, !is.na(gene), gene != "") %>%
+      pull(gene) %>% unique()
+    g
+  }
+  GSETS <- list()
+  for (ln in names(LINES)) for (dg in names(DRUGS)) {
+    g <- gsig(ln, dg); if (length(g)) GSETS[[ln]][[dg]] <- g
+  }
+  
+  ## --- G-C. cross-line 2-set gene Venn per drug (+combined) ---
+  gvenn_list <- list(); gsumm <- list()
+  for (dg in names(DRUGS)) {
+    gk <- GSETS[["KNS-42"]][[dg]]; gs <- GSETS[["SVG-A"]][[dg]]
+    if (is.null(gk) || is.null(gs)) next
+    p <- make_venn2(gk, gs, sprintf("%s (genes)", dg))
+    ggsave(file.path(gdir, sprintf("Fig_%s_gene_venn2.png", dg)), p, width = 5, height = 5, dpi = 600)
+    gvenn_list[[dg]] <- p
+    gsumm[[dg]] <- data.frame(drug = dg, KNS_DEGs = length(gk), SVG_DEGs = length(gs),
+                              shared_genes = length(intersect(gk, gs)))
+  }
+  if (length(gvenn_list)) {
+    pv <- wrap_plots(gvenn_list, nrow = 1) +
+      plot_annotation(title = "DEG overlap between cell lines, by drug (gene level)",
+                      caption = sprintf("%s; DETs collapsed to genes. KNS-42 = teal (left), SVG-A = purple (right).", thr_lab),
+                      theme = theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 17),
+                                    plot.caption = element_text(size = 11, colour = "grey40")))
+    ggsave(file.path(out_dir, "Fig_gene_venn2_ALL.pdf"), pv, width = 4.6*length(gvenn_list), height = 5.2, device = cairo_pdf, limitsize = FALSE)
+    ggsave(file.path(out_dir, "Fig_gene_venn2_ALL.png"), pv, width = 4.6*length(gvenn_list), height = 5.2, dpi = 600, limitsize = FALSE)
+    message("G. cross-line gene Venns written.")
+  }
+  
+  ## --- G-D. per cell line: gene-level UpSet + 5-set Venn ---
+  for (ln in names(GSETS)) {
+    drug_sets <- GSETS[[ln]]
+    if (length(drug_sets) < 2) next
+    tag <- gsub("[^A-Za-z0-9]", "", ln)
+    ## UpSet
+    tryCatch({
+      all_g <- unique(unlist(drug_sets))
+      memb <- data.frame(gene = all_g, stringsAsFactors = FALSE)
+      for (dn in names(drug_sets)) memb[[dn]] <- all_g %in% drug_sets[[dn]]
+      up <- ComplexUpset::upset(memb, intersect = names(drug_sets), min_size = 1,
+                                sort_intersections_by = "cardinality",
+                                base_annotations = list('Intersection size' =
+                                                          ComplexUpset::intersection_size(text = list(size = 3.5)))) +
+        labs(title = sprintf("%s - DEG overlap across drugs, gene level (%s)", ln, thr_lab))
+      ggsave(file.path(out_dir, sprintf("Fig_gene_upset_%s.pdf", tag)), up, width = 10, height = 6, device = cairo_pdf)
+      ggsave(file.path(out_dir, sprintf("Fig_gene_upset_%s.png", tag)), up, width = 10, height = 6, dpi = 600)
+      message("  ", ln, ": gene UpSet written.")
+    }, error = function(e) message("  ", ln, ": gene UpSet FAILED — ", conditionMessage(e)))
+    ## 5-set Venn
+    tryCatch({
+      v <- ggVennDiagram::ggVennDiagram(drug_sets, label = "count", label_alpha = 0, edge_size = 0.4) +
+        scale_fill_gradient(low = "#F7FBFF", high = "#7F77DD", name = "DEGs") +
+        scale_x_continuous(expand = expansion(mult = 0.12)) +
+        labs(title = sprintf("%s - shared DEGs across drugs (gene level)", ln)) +
+        theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 16), legend.position = "right")
+      ggsave(file.path(out_dir, sprintf("Fig_gene_venn5_%s.pdf", tag)), v, width = 7.5, height = 6.5, device = cairo_pdf)
+      ggsave(file.path(out_dir, sprintf("Fig_gene_venn5_%s.png", tag)), v, width = 7.5, height = 6.5, dpi = 600)
+      message("  ", ln, ": gene 5-set Venn written.")
+    }, error = function(e) message("  ", ln, ": gene 5-set Venn FAILED — ", conditionMessage(e)))
+  }
+  
+  if (length(gsumm)) {
+    write_csv(bind_rows(gsumm), file.path(out_dir, "DEG_gene_summary_all_drugs.csv"))
+    message("G. gene-level summary written."); print(bind_rows(gsumm), row.names = FALSE)
+  }
+  
+  ## --- G-E. gene-level concordance scatter (KNS vs SVG log2FC per drug) ---
+  # collapse each line/drug to one log2FC per gene (most-significant transcript)
+  gene_lfc <- function(ln, dg) {
+    ALL %>% filter(line == ln, drug == dg, sig, !is.na(gene), gene != "") %>%
+      group_by(gene) %>% slice_min(padj, n = 1, with_ties = FALSE) %>% ungroup() %>%
+      dplyr::select(gene, lfc)
+  }
+  gconc_plots <- list(); gconc_stats <- list()
+  for (dg in names(DRUGS)) {
+    gk <- GSETS[["KNS-42"]][[dg]]; gs <- GSETS[["SVG-A"]][[dg]]
+    if (is.null(gk) || is.null(gs)) next
+    kk <- gene_lfc("KNS-42", dg); ss <- gene_lfc("SVG-A", dg)
+    mg <- inner_join(kk %>% dplyr::rename(lfc_A = lfc),
+                     ss %>% dplyr::rename(lfc_B = lfc), by = "gene") %>%
+      mutate(dir = ifelse(sign(lfc_A) == sign(lfc_B), "Concordant", "Discordant"))
+    if (!nrow(mg)) next
+    n_t <- nrow(mg); n_c <- sum(mg$dir == "Concordant")
+    pr <- if (n_t > 2) cor(mg$lfc_A, mg$lfc_B) else NA_real_
+    axm <- max(abs(c(mg$lfc_A, mg$lfc_B)))
+    psc <- ggplot(mg, aes(lfc_A, lfc_B, colour = dir)) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.3) +
+      geom_hline(yintercept = 0, colour = "grey80", linewidth = 0.3) +
+      geom_vline(xintercept = 0, colour = "grey80", linewidth = 0.3) +
+      geom_point(size = 1.7, alpha = 0.8) +
+      scale_colour_manual(values = c(Concordant = COL_CONC, Discordant = COL_DISC)) +
+      coord_equal(xlim = c(-axm, axm), ylim = c(-axm, axm)) +
+      labs(title = sprintf("%s: shared gene log2FC", dg),
+           x = "log2FC  KNS-42", y = "log2FC  SVG-A",
+           caption = sprintf("%s shared genes. Same dir: %s (%.0f%%). r = %s.",
+                             comma(n_t), comma(n_c), 100*n_c/n_t,
+                             ifelse(is.na(pr), "NA", formatC(pr, format="f", digits=2)))) +
+      theme_pub
+    ggsave(file.path(gdir, sprintf("Fig_%s_gene_concordance.png", dg)), psc, width = 5.6, height = 5.6, dpi = 600)
+    gconc_plots[[dg]] <- psc + labs(caption = NULL)
+    gconc_stats[[dg]] <- data.frame(drug = dg, shared_genes = n_t, pct_concordant = round(100*n_c/n_t,1),
+                                    pearson_r = ifelse(is.na(pr), NA, round(pr,3)))
+  }
+  if (length(gconc_plots)) {
+    pc <- wrap_plots(gconc_plots, nrow = 1) +
+      plot_annotation(title = "Shared-gene concordance (KNS-42 vs SVG-A) by drug (gene level)",
+                      caption = sprintf("%s; DETs collapsed to genes. Dashed line = y = x.", thr_lab),
+                      theme = theme(plot.title = element_text(face="bold", hjust=0.5, size=17),
+                                    plot.caption = element_text(size=11, colour="grey40"))) & theme(legend.position = "bottom")
+    ggsave(file.path(out_dir, "Fig_gene_ALL_concordance.pdf"), pc, width = 5.2*length(gconc_plots), height = 5.6, device = cairo_pdf, limitsize = FALSE)
+    ggsave(file.path(out_dir, "Fig_gene_ALL_concordance.png"), pc, width = 5.2*length(gconc_plots), height = 5.6, dpi = 600, limitsize = FALSE)
+    message("G. gene-level concordance figures written.")
+  }
+  if (length(gconc_stats)) {
+    gtab <- bind_rows(gconc_stats)
+    write_csv(gtab, file.path(out_dir, "DEG_gene_concordance_all_drugs.csv"))
+  }
 }
 
 
