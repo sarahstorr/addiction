@@ -1,0 +1,79 @@
+
+analysis_dir <- "C:/Users/mrzsjs1/Desktop/Addiction/analysis"
+backup_dir   <- file.path(analysis_dir, "_pre_annotation_backup")
+ID_COL       <- "ENSEMBL_TRANSCRIPT"   # transcript-ID column in your files
+## ========================================================================= ##
+
+## --- packages --------------------------------------------------------------
+suppressPackageStartupMessages({ library(readr); library(dplyr) })
+
+## --- build an offline ENST -> (symbol, ENSG) map ---------------------------
+build_map <- function() {
+  ## Preferred: EnsDb.Hsapiens.v86 (fullest Ensembl transcript coverage)
+  if (requireNamespace("ensembldb", quietly = TRUE) &&
+      requireNamespace("EnsDb.Hsapiens.v86", quietly = TRUE)) {
+    message("Annotation source: EnsDb.Hsapiens.v86 (offline).")
+    suppressPackageStartupMessages({ library(ensembldb); library(EnsDb.Hsapiens.v86) })
+    tx <- transcripts(EnsDb.Hsapiens.v86,
+                      columns = c("tx_id","gene_id","gene_name"),
+                      return.type = "data.frame")
+    return(data.frame(bare = tx$tx_id,
+                      gene_symbol = tx$gene_name,
+                      gene_id = tx$gene_id,
+                      stringsAsFactors = FALSE))
+  }
+  ## Fallback: org.Hs.eg.db (you already have this)
+  if (requireNamespace("AnnotationDbi", quietly = TRUE) &&
+      requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+    message("Annotation source: org.Hs.eg.db (offline fallback).")
+    suppressPackageStartupMessages({ library(AnnotationDbi); library(org.Hs.eg.db) })
+    k <- keys(org.Hs.eg.db, keytype = "ENSEMBLTRANS")
+    m <- suppressMessages(AnnotationDbi::select(org.Hs.eg.db, keys = k,
+                                                keytype = "ENSEMBLTRANS", columns = c("SYMBOL","ENSEMBL")))
+    return(data.frame(bare = m$ENSEMBLTRANS,
+                      gene_symbol = m$SYMBOL,
+                      gene_id = m$ENSEMBL,     # NOTE: org.Hs ENSEMBL = ENSG gene id
+                      stringsAsFactors = FALSE))
+  }
+  stop("No offline annotation package found. Install ONE of:\n",
+       "  BiocManager::install('EnsDb.Hsapiens.v86')   (preferred)\n",
+       "  BiocManager::install('org.Hs.eg.db')")
+}
+
+map <- build_map() %>%
+  filter(!is.na(bare)) %>%
+  distinct(bare, .keep_all = TRUE)               # one row per transcript
+message("Map built: ", nrow(map), " transcripts.")
+
+## --- annotate every CSV ----------------------------------------------------
+dir.create(backup_dir, showWarnings = FALSE, recursive = TRUE)
+files <- list.files(analysis_dir, pattern = "\\.csv$", full.names = TRUE)
+files <- files[!grepl("_pre_annotation_backup", files)]
+message("Found ", length(files), " CSV(s) to annotate.\n")
+
+for (fp in files) {
+  fn <- basename(fp)
+  df <- readr::read_csv(fp, show_col_types = FALSE)
+  if (!ID_COL %in% names(df)) { message("  SKIP ", fn, " (no ", ID_COL, " column)"); next }
+  
+  ## don't double-annotate
+  if (all(c("gene_symbol","gene_id") %in% names(df))) {
+    message("  already annotated: ", fn, " — skipped"); next
+  }
+  
+  ## backup original once
+  bkp <- file.path(backup_dir, fn)
+  if (!file.exists(bkp)) file.copy(fp, bkp)
+  
+  df$bare <- sub("\\..*$", "", as.character(df[[ID_COL]]))   # strip version
+  out <- df %>%
+    left_join(map, by = "bare") %>%
+    select(-bare)
+  
+  n_mapped <- sum(!is.na(out$gene_symbol) & out$gene_symbol != "")
+  readr::write_csv(out, fp)                                  # overwrite in place
+  message(sprintf("  %-45s %d/%d transcripts annotated (%.0f%%)",
+                  fn, n_mapped, nrow(out), 100*n_mapped/nrow(out)))
+}
+
+message("\nDONE. Files overwritten in place. Originals backed up in:\n  ", backup_dir)
