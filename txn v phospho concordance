@@ -1,0 +1,184 @@
+
+##   * Phosphoproteomics is KNS-42 ONLY -> this figure is KNS-42 only.
+##   * Transcripts use ADJUSTED p; phosphopeptides use RAW p (few/none survive
+##     multiple-testing correction at the available replicate number).
+###############################################################################
+
+## =============================== SETTINGS ================================= ##
+det_dir   <- "C:/Users/mrzsjs1/Desktop/Addiction/analysis"          # annotated DET CSVs (KNS)
+phos_dir  <- "C:/Users/mrzsjs1/Downloads"                           # phospho xlsx files
+out_dir   <- file.path(det_dir, "figures", "transc_phospho")
+
+DRUGS <- c(Ethanol = "ethanol", THC = "thc", Cocaine = "cocaine",
+           Morphine = "morphine", Psilocin = "psilocin")
+LINE_KEY <- "KNS"    # DET filename prefix for KNS
+
+# significance
+PADJ <- 0.05; LFC <- 1
+PHOS_USE_RAW_P <- TRUE     # phospho: use raw p (see note above)
+
+COLLAPSE <- "most_sig"    # "most_sig" (smallest p) or "mean"
+GENESET  <- "either"      # genes sig in "either" layer, "both", or "all"
+
+# palette (siblings to the other figures)
+COL_CONC_UP   <- "#1D9E75"  # green  — both up
+COL_CONC_DOWN <- "#378ADD"  # blue   — both down
+COL_DISC      <- "#E69F00"  # orange — discordant
+## ========================================================================= ##
+
+## --- packages --------------------------------------------------------------
+pkgs <- c("readr","readxl","dplyr","ggplot2","scales","patchwork")
+missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing)) install.packages(missing)
+suppressPackageStartupMessages({
+  library(readr); library(readxl); library(dplyr); library(ggplot2)
+  library(scales); library(patchwork)
+})
+select <- dplyr::select; filter <- dplyr::filter; rename <- dplyr::rename
+mutate <- dplyr::mutate; slice <- dplyr::slice; arrange <- dplyr::arrange
+summarise <- dplyr::summarise; group_by <- dplyr::group_by
+transmute <- dplyr::transmute; ungroup <- dplyr::ungroup
+slice_min <- dplyr::slice_min; inner_join <- dplyr::inner_join
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+## --- shared theme (siblings to the other figures) --------------------------
+theme_pub <- theme_classic(base_size = 15) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 16),
+        axis.title = element_text(size = 14),
+        axis.text  = element_text(colour = "grey20", size = 12),
+        plot.caption = element_text(size = 10, colour = "grey40", hjust = 0),
+        legend.position = "bottom", legend.title = element_blank(),
+        legend.text = element_text(size = 12))
+
+pick <- function(aliases, nm, field, required = TRUE) {
+  hit <- nm[tolower(nm) %in% tolower(aliases)]
+  if (!length(hit)) { if (required) stop("No ", field, " column. Looked for: ",
+                                         paste(aliases, collapse=", "), "\n  file has: ", paste(nm, collapse=", ")); return(NA_character_) }
+  hit[1]
+}
+find_det <- function(drug_key) {
+  f <- list.files(det_dir, pattern = "\\.csv$", full.names = TRUE)
+  hit <- f[grepl(paste0("(^|[^A-Za-z])", LINE_KEY), basename(f), ignore.case = TRUE) &
+             grepl(drug_key, basename(f), ignore.case = TRUE)]
+  if (length(hit)) hit[1] else NA_character_
+}
+find_phos <- function(drug_key) {
+  f <- list.files(phos_dir, pattern = "\\.xlsx?$", full.names = TRUE)
+  hit <- f[grepl(drug_key, basename(f), ignore.case = TRUE) &
+             grepl("phospho", basename(f), ignore.case = TRUE)]
+  if (length(hit)) hit[1] else NA_character_
+}
+
+collapse_layer <- function(df, val, pcol) {
+  if (COLLAPSE == "mean") {
+    df %>% group_by(gene) %>% summarise(v = mean(.data[[val]], na.rm = TRUE),
+                                        p = suppressWarnings(min(.data[[pcol]], na.rm = TRUE)),
+                                        .groups = "drop")
+  } else {
+    df %>% arrange(.data[[pcol]]) %>% group_by(gene) %>% slice(1) %>% ungroup() %>%
+      transmute(gene, v = .data[[val]], p = .data[[pcol]])
+  }
+}
+
+## --- build one drug's concordance data -------------------------------------
+build_drug <- function(drug_label, drug_key) {
+  det_fp  <- find_det(drug_key); phos_fp <- find_phos(drug_key)
+  if (is.na(det_fp))  { message("  ", drug_label, ": no DET file — skipped");  return(NULL) }
+  if (is.na(phos_fp)) { message("  ", drug_label, ": no phospho file — skipped"); return(NULL) }
+  
+  ## transcriptomics (annotated -> has gene_symbol)
+  dr <- readr::read_csv(det_fp, show_col_types = FALSE); nm <- names(dr)
+  dg <- pick(c("gene_symbol","external_gene_name","gene_name","symbol"), nm, "DET gene")
+  dl <- pick(c("log2FoldChange","log2FC"), nm, "DET log2FC")
+  dp <- pick(c("padj","FDR","adj.P.Val"), nm, "DET padj")
+  det <- dr %>% transmute(gene = toupper(trimws(as.character(.data[[dg]]))),
+                          t_lfc = as.numeric(.data[[dl]]),
+                          t_p = as.numeric(.data[[dp]])) %>%
+    filter(!is.na(gene), gene != "", !is.na(t_lfc), !is.na(t_p))
+  det_c <- collapse_layer(det, "t_lfc", "t_p") %>% rename(t_lfc = v, t_p = p)
+  
+  ## phosphoproteomics (raw p by necessity)
+  pr <- readxl::read_excel(phos_fp); pm <- names(pr)
+  pg <- pick(c("gene","gene_name","external_gene_name","symbol"), pm, "phospho gene")
+  pl <- pick(c("log2_fold_change","log2FC","log2FoldChange","logFC"), pm, "phospho log2FC")
+  praw<- pick(c("p_value","pvalue","P.Value"), pm, "phospho raw p", required = FALSE)
+  padj<- pick(c("adj_p_value","padj","adj.P.Val","FDR"), pm, "phospho adj p", required = FALSE)
+  psig<- if (PHOS_USE_RAW_P && !is.na(praw)) praw else padj
+  phos <- pr %>% transmute(gene = toupper(trimws(sub("[;,].*$","", as.character(.data[[pg]])))),
+                           p_lfc = as.numeric(.data[[pl]]),
+                           p_p = if (!is.na(psig)) as.numeric(.data[[psig]]) else NA_real_) %>%
+    filter(!is.na(gene), gene != "", !is.na(p_lfc))
+  phos_c <- collapse_layer(phos, "p_lfc", "p_p") %>% rename(p_lfc = v, p_p = p)
+  
+  ## join + classify
+  mg <- inner_join(det_c, phos_c, by = "gene")
+  det_sig  <- !is.na(mg$t_p) & mg$t_p < PADJ & abs(mg$t_lfc) > LFC
+  phos_sig <- if (all(is.na(mg$p_p))) abs(mg$p_lfc) > LFC else (mg$p_p < PADJ & abs(mg$p_lfc) > LFC)
+  keep <- switch(GENESET, both = det_sig & phos_sig, either = det_sig | phos_sig, all = TRUE)
+  mg <- mg[keep, , drop = FALSE]
+  if (!nrow(mg)) { message("  ", drug_label, ": 0 genes after filtering — skipped"); return(NULL) }
+  mg$class <- with(mg, ifelse(sign(t_lfc) == sign(p_lfc),
+                              ifelse(t_lfc > 0, "Concordant up", "Concordant down"), "Discordant"))
+  mg$drug <- drug_label
+  message(sprintf("  %s: %d genes (up-up %d, down-down %d, discordant %d)", drug_label, nrow(mg),
+                  sum(mg$class=="Concordant up"), sum(mg$class=="Concordant down"),
+                  sum(mg$class=="Discordant")))
+  mg
+}
+
+## --- run all drugs ---------------------------------------------------------
+message("Building transcript-vs-phospho concordance (KNS-42):")
+dat <- lapply(names(DRUGS), function(d) build_drug(d, DRUGS[[d]]))
+names(dat) <- names(DRUGS)
+dat <- dat[!vapply(dat, is.null, logical(1))]
+if (!length(dat)) stop("No drugs produced data — check file locations/names.")
+
+col_map <- c("Concordant up" = COL_CONC_UP, "Concordant down" = COL_CONC_DOWN, "Discordant" = COL_DISC)
+ax_all  <- max(vapply(dat, function(m) max(abs(c(m$t_lfc, m$p_lfc))), numeric(1)))
+
+one_panel <- function(mg, show_caption = TRUE) {
+  n_t <- nrow(mg); rr <- if (n_t > 2) cor(mg$t_lfc, mg$p_lfc) else NA_real_
+  cap <- if (show_caption) sprintf("%d genes; r = %s", n_t,
+                                   ifelse(is.na(rr),"NA",formatC(rr,format="f",digits=2))) else NULL
+  ggplot(mg, aes(t_lfc, p_lfc, colour = class)) +
+    geom_hline(yintercept = 0, colour = "grey85", linewidth = 0.3) +
+    geom_vline(xintercept = 0, colour = "grey85", linewidth = 0.3) +
+    geom_point(size = 1.8, alpha = 0.8) +
+    scale_colour_manual(values = col_map, drop = FALSE) +
+    coord_equal(xlim = c(-ax_all, ax_all), ylim = c(-ax_all, ax_all)) +
+    labs(title = mg$drug[1],
+         x = expression(Transcript~log[2]~FC), y = expression(Phospho~log[2]~FC),
+         caption = cap) +
+    theme_pub
+}
+
+## per-drug files
+for (d in names(dat)) {
+  p <- one_panel(dat[[d]])
+  ggsave(file.path(out_dir, sprintf("Fig_transc_phospho_%s.pdf", tolower(d))), p, width = 5.6, height = 6.0, device = cairo_pdf)
+  ggsave(file.path(out_dir, sprintf("Fig_transc_phospho_%s.png", tolower(d))), p, width = 5.6, height = 6.0, dpi = 600)
+}
+
+## combined A-E
+panels <- lapply(dat, one_panel, show_caption = TRUE)
+comb <- wrap_plots(panels, nrow = 1) + plot_layout(guides = "collect") +
+  plot_annotation(
+    title = "Transcriptomic vs phosphoproteomic concordance in KNS-42 by drug",
+    caption = sprintf("Transcripts: adj p<%.2g & |log2FC|>%g; phosphopeptides: raw p<%.2g (uncorrected). Green = concordant up, blue = concordant down, orange = discordant.",
+                      PADJ, LFC, PADJ),
+    theme = theme(plot.title = element_text(face="bold", hjust=0.5, size=17),
+                  plot.caption = element_text(size=10, colour="grey40"))) &
+  theme(legend.position = "bottom")
+ggsave(file.path(out_dir, "Fig_transc_phospho_ALL.pdf"), comb, width = 5.2*length(panels), height = 6.2, device = cairo_pdf, limitsize = FALSE)
+ggsave(file.path(out_dir, "Fig_transc_phospho_ALL.png"), comb, width = 5.2*length(panels), height = 6.2, dpi = 500, limitsize = FALSE)
+
+## summary + per-gene tables
+summ <- bind_rows(lapply(dat, function(m) data.frame(
+  drug = m$drug[1], genes = nrow(m),
+  conc_up = sum(m$class=="Concordant up"), conc_down = sum(m$class=="Concordant down"),
+  discordant = sum(m$class=="Discordant"),
+  pearson_r = round(cor(m$t_lfc, m$p_lfc), 3))))
+write_csv(summ, file.path(out_dir, "transc_phospho_summary.csv"))
+for (d in names(dat)) write_csv(dat[[d]], file.path(out_dir, sprintf("transc_phospho_%s_genes.csv", tolower(d))))
+message("\nSummary:"); print(summ, row.names = FALSE)
+message("\nDONE -> ", out_dir)
