@@ -1,0 +1,125 @@
+
+suppressPackageStartupMessages({ library(ggVennDiagram); library(ComplexUpset) })
+
+## ---- output location (your standard place) --------------------------------
+outdir <- "C:/Users/mrzsjs1/Desktop/Addiction/analysis/figures/metabolomics"
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+## ---- palette + theme identical to the other figures -----------------------
+COL_UP <- "#E24B4A"; COL_DOWN <- "#378ADD"; COL_NS <- "#B4B2A9"
+theme_pub <- theme_classic(base_size = 15) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 17),
+        axis.title = element_text(size = 15),
+        axis.text  = element_text(colour = "grey20", size = 13),
+        strip.text = element_text(face = "bold", size = 15, hjust = 0.5),
+        strip.background = element_blank(),
+        plot.caption = element_text(size = 11, colour = "grey40", hjust = 0),
+        legend.position = "bottom", legend.title = element_blank(),
+        legend.text = element_text(size = 13))
+thr_lab <- sprintf("adjusted p < %.2g & |log2FC| > %g", PADJ_CUT, LFC_CUT)
+
+## ---- 1. VOLCANOES (markup identical to the transcriptomic volcanoes) -------
+long <- long %>% mutate(
+  drug = factor(drug, levels = drug_order),
+  cls  = ifelse(!sig, "ns", ifelse(log2FC > 0, "up", "down")),
+  cls  = factor(cls, levels = c("ns","down","up")))
+x_lim <- c(floor(min(long$log2FC)), ceiling(max(long$log2FC)))
+y_disp <- ceiling(max(-log10(long$adj_p)))
+counts <- long %>% filter(sig) %>% group_by(drug) %>%
+  summarise(n_up = sum(log2FC > 0), n_dn = sum(log2FC < 0), .groups = "drop")
+
+p_volc <- ggplot(long, aes(log2FC, -log10(adj_p))) +
+  geom_hline(yintercept = -log10(PADJ_CUT), linetype = "dashed", colour = "grey55", linewidth = 0.3) +
+  geom_vline(xintercept = c(-LFC_CUT, LFC_CUT), linetype = "dashed", colour = "grey55", linewidth = 0.3) +
+  geom_point(aes(colour = cls), size = 0.8, alpha = 0.6) +
+  scale_colour_manual(values = c(ns = COL_NS, down = COL_DOWN, up = COL_UP),
+                      labels = c(ns="NS", down="Down", up="Up"), breaks = c("up","down","ns")) +
+  geom_text(data = counts, aes(x = x_lim[1], y = y_disp,
+                               label = sprintf("up %s\ndown %s", n_up, n_dn)),
+            inherit.aes = FALSE, hjust = 0, vjust = 1, size = 3.4, colour = "grey25") +
+  facet_wrap(~ drug, nrow = 1) +
+  coord_cartesian(xlim = x_lim, ylim = c(0, y_disp)) +
+  labs(title = "Metabolomic response by drug (KNS-42)",
+       x = expression(log[2]~fold-change), y = expression(-log[10]~adjusted~italic(p)),
+       caption = sprintf("Putative features, %s. Each drug vs untreated control (THC vs ethanol control).", thr_lab)) +
+  theme_pub
+ggsave(file.path(outdir, "Fig_metab_volcanoes.pdf"), p_volc, width = 4 + 2.6*length(drug_order), height = 5.4, device = cairo_pdf, limitsize = FALSE)
+ggsave(file.path(outdir, "Fig_metab_volcanoes.png"), p_volc, width = 4 + 2.6*length(drug_order), height = 5.4, dpi = 500, limitsize = FALSE)
+
+## ---- 2. 5-way overlap (Venn + UpSet), styled like the transcript Venn ------
+feat_sets <- long %>% filter(sig) %>% split(.$drug) %>% lapply(function(d) unique(d$Name))
+# order the sets around the Venn to MATCH the other 5-way Venns
+# (transcriptomic/phospho use: Ethanol, THC, Cocaine, Morphine, Psilocin)
+venn_order <- c("Ethanol","THC","Cocaine","Morphine","Psilocin")
+venn_order <- venn_order[venn_order %in% names(feat_sets)]
+feat_sets <- feat_sets[venn_order]
+feat_sets <- feat_sets[!vapply(feat_sets, is.null, logical(1))]
+
+if (length(feat_sets) >= 2) {
+  v <- ggVennDiagram::ggVennDiagram(feat_sets, label = "count", label_alpha = 0, edge_size = 0.4) +
+    scale_fill_gradient(low = "#F7FBFF", high = "#7F77DD", name = "features") +
+    scale_x_continuous(expand = expansion(mult = 0.12)) +
+    labs(title = "Significantly changed features shared across drugs (KNS-42)",
+         caption = sprintf("Putative metabolomic features, %s.", thr_lab)) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 16),
+          plot.caption = element_text(size = 10, colour = "grey40", hjust = 0.5),
+          legend.position = "right")
+  ggsave(file.path(outdir, "Fig_metab_venn5.pdf"), v, width = 8, height = 7, device = cairo_pdf)
+  ggsave(file.path(outdir, "Fig_metab_venn5.png"), v, width = 8, height = 7, dpi = 600)
+  
+  all_f <- unique(unlist(feat_sets))
+  memb <- data.frame(feature = all_f, stringsAsFactors = FALSE)
+  for (dn in names(feat_sets)) memb[[dn]] <- all_f %in% feat_sets[[dn]]
+  memb$n_drugs <- rowSums(memb[names(feat_sets)])
+  
+  up <- ComplexUpset::upset(memb, intersect = names(feat_sets), min_size = 1,
+                            sort_intersections_by = "cardinality",
+                            base_annotations = list('Intersection size' =
+                                                      ComplexUpset::intersection_size(text = list(size = 3.5)))) +
+    labs(title = "Features significantly changed across drugs (KNS-42)")
+  ggsave(file.path(outdir, "Fig_metab_upset.pdf"), up, width = 10, height = 6, device = cairo_pdf)
+  ggsave(file.path(outdir, "Fig_metab_upset.png"), up, width = 10, height = 6, dpi = 600)
+  
+  ## ---- shared-feature lists for write-up ----
+  readr::write_csv(memb, file.path(outdir, "metab_overlap_membership.csv"))
+  readr::write_csv(as.data.frame(table(regulated_in_n_drugs = memb$n_drugs)),
+                   file.path(outdir, "metab_sharing_distribution.csv"))
+  
+  ## features shared by ALL drugs — with log2FC in each drug (direction)
+  core_feats <- memb$feature[memb$n_drugs == length(feat_sets)]
+  core_tbl <- long %>% filter(Name %in% core_feats, sig) %>%
+    select(Name, drug, log2FC) %>% mutate(log2FC = round(log2FC, 2)) %>%
+    tidyr::pivot_wider(names_from = drug, values_from = log2FC)
+  readr::write_csv(core_tbl, file.path(outdir, "metab_shared_ALL_drugs.csv"))
+  
+  ## multi-drug (>=2) list with which drugs
+  multi <- memb %>% filter(n_drugs >= 2) %>% arrange(desc(n_drugs)) %>%
+    mutate(drugs = apply(across(all_of(names(feat_sets))), 1,
+                         function(r) paste(names(feat_sets)[as.logical(r)], collapse = "; "))) %>%
+    select(feature, n_drugs, drugs)
+  readr::write_csv(multi, file.path(outdir, "metab_shared_multidrug.csv"))
+  
+  message("\nFeatures shared by ALL ", length(feat_sets), " drugs (", length(core_feats), "):")
+  print(core_feats)
+  message("(log2FC per drug -> metab_shared_ALL_drugs.csv)")
+  message("\nSharing distribution:"); print(as.data.frame(table(n_drugs = memb$n_drugs)), row.names = FALSE)
+}
+
+## ---- 3. PCA (styled) -------------------------------------------------------
+p_pca <- ggplot(pcdf, aes(PC1, PC2, colour = group)) +
+  geom_hline(yintercept = 0, colour = "grey85", linewidth = 0.3) +
+  geom_vline(xintercept = 0, colour = "grey85", linewidth = 0.3) +
+  geom_point(size = 2.6, alpha = 0.85) +
+  scale_colour_manual(values = pal, drop = TRUE) +
+  labs(title = "Metabolomic profiles, PCA (KNS-42)",
+       x = sprintf("PC1 (%.1f%%)", ve[1]), y = sprintf("PC2 (%.1f%%)", ve[2])) +
+  theme_pub + theme(legend.title = element_blank())
+ggsave(file.path(outdir, "Fig_metab_PCA.pdf"), p_pca, width = 6.5, height = 5.5, device = cairo_pdf)
+ggsave(file.path(outdir, "Fig_metab_PCA.png"), p_pca, width = 6.5, height = 5.5, dpi = 600)
+
+## ---- summary ---------------------------------------------------------------
+summ <- long %>% filter(sig) %>% group_by(drug) %>%
+  summarise(sig_features = n(), up = sum(log2FC > 0), down = sum(log2FC < 0), .groups = "drop")
+readr::write_csv(summ, file.path(outdir, "metab_summary.csv"))
+message("\nSignificant features per drug:"); print(as.data.frame(summ), row.names = FALSE)
+message("\nDONE -> ", outdir)
