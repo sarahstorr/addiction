@@ -1,0 +1,179 @@
+##############################################################################
+
+## ------- packages -------
+pkgs <- c("data.table","readxl","dplyr","tidyr","stringr","ggplot2","scales")
+for (p in pkgs) if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
+suppressPackageStartupMessages(lapply(pkgs, library, character.only=TRUE))
+
+## ============================ CONFIG =====================================
+DOWNLOADS <- "C:/Users/mrzsjs1/Downloads"        # <- your folder (forward slashes)
+PTM_TSV   <- file.path(DOWNLOADS, "20241018_112329_P0904_Phospho_Report_PTM.tsv")
+SCORE_FILE <- function(drug) file.path(DOWNLOADS, paste0(drug, "_Kinase_Scores.xlsx"))
+OUT_DIR   <- file.path(DOWNLOADS, "kinase_figs"); dir.create(OUT_DIR, showWarnings=FALSE)
+
+SITE_PROB <- 0.75      # class I localisation
+MIN_REP   <- 3         # sites need >= this many non-missing values in EACH group
+MIN_SUB   <- 3         # kinase needs >= this many substrates
+MIN_DRUGS <- 4         # keep kinases scored in >= this many drugs
+TOP_N     <- 28        # kinases shown (by mean |z|)
+MEDIAN_NORM <- TRUE    # median-centre runs before contrasts
+
+## drug -> (treatment group, control group).  THC uses the ethanol vehicle (EC).
+GROUPS <- list(UC=1:4, EC=5:8, E=9:12, T=13:16, C=17:20, M=21:24, P=25:28)
+CONTRAST <- list(Ethanol=c("E","UC"), THC=c("T","EC"), Cocaine=c("C","UC"),
+                 Morphine=c("M","UC"), Psilocin=c("P","UC"))
+DRUGS <- names(CONTRAST)
+
+## ------- shared look: matched to the paper's IPA transcriptomics figure ---
+COL_INH <- "#2166AC"; COL_MID <- "#FFFFFF"; COL_ACT <- "#E08214"; NA_COL <- "grey96"
+Z_CAP   <- 4          # clamp KSEA z colour scale at +/- this
+theme_ipa <- theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face = "bold", colour = "grey20"),
+        axis.text.y = element_text(size = 9, colour = "black"),
+        panel.grid  = element_blank(),
+        plot.title  = element_text(face = "bold", hjust = 0.5, size = 13, margin = margin(b = 8)),
+        plot.caption= element_text(size = 8, colour = "grey45", hjust = 0),
+        legend.title= element_text(size = 10),
+        legend.text = element_text(size = 9),
+        legend.position = "right",
+        plot.margin = margin(10, 10, 8, 10))
+num <- function(x) as.numeric(gsub(",", ".", x, fixed = TRUE))   # comma-decimal -> numeric
+
+## ==================== 1. read PTM site report ============================
+message("Reading PTM report ...")
+dt <- fread(PTM_TSV, sep = "\t",
+            select = c("R.FileName","PTM.CollapseKey","PTM.ModificationTitle",
+                       "PTM.Quantity","PTM.SiteProbability"),
+            colClasses = "character", showProgress = TRUE)
+
+dt <- dt[PTM.ModificationTitle == "Phospho (STY)"]
+dt[, samp := as.integer(sub(".*_phospho_([0-9]+).*", "\\1", R.FileName))]      # sheet Sample_Name
+dt[, q    := num(PTM.Quantity)]
+dt[, prob := num(PTM.SiteProbability)]
+dt <- dt[grepl("_[STY][0-9]+_M[0-9]+$", PTM.CollapseKey)]                       # phospho-STY sites only
+dt[, key := sub("_M[0-9]+$", "", PTM.CollapseKey)]                             # accession_residue (drop multiplicity)
+dt <- dt[!is.na(q) & q > 0 & !is.na(prob) & prob >= SITE_PROB & !is.na(samp)]
+
+## site x sample matrix (sum multiplicities), log2, optional median-normalise
+agg  <- dt[, .(q = sum(q)), by = .(key, samp)]
+wide <- dcast(agg, key ~ samp, value.var = "q", fill = NA)
+M <- as.matrix(log2(wide[, -1])); rownames(M) <- wide$key
+colnames(M) <- as.integer(colnames(M))
+if (MEDIAN_NORM) M <- sweep(M, 2, apply(M, 2, median, na.rm = TRUE), "-")
+
+## ==================== 2. true background per drug ========================
+bg <- lapply(CONTRAST, function(cc){
+  dcol <- as.character(GROUPS[[cc[1]]]); ccol <- as.character(GROUPS[[cc[2]]])
+  dn <- rowSums(!is.na(M[, dcol])); cn <- rowSums(!is.na(M[, ccol]))
+  keep <- dn >= MIN_REP & cn >= MIN_REP
+  fc <- rowMeans(M[keep, dcol], na.rm = TRUE) - rowMeans(M[keep, ccol], na.rm = TRUE)
+  c(mP = mean(fc), sdP = sd(fc), n = sum(keep))
+})
+bg <- do.call(rbind, bg); rownames(bg) <- DRUGS
+message("True full-proteome background (log2FC):")
+print(round(bg, 3))
+
+## ==================== 3. corrected KSEA per drug =========================
+score <- bind_rows(lapply(DRUGS, function(drug){
+  s <- read_excel(SCORE_FILE(drug))
+  s$mS <- num(s$mS)     # Excel may store these as text / comma-decimals
+  s$m  <- num(s$m)
+  mP <- as.numeric(bg[drug, "mP"]); sdP <- as.numeric(bg[drug, "sdP"])
+  s %>% filter(!is.na(mS), !is.na(m)) %>%
+    transmute(kinase = Kinase.Gene,
+              z = (mS - mP) * sqrt(m) / sdP,
+              p = 2 * pnorm(-abs((mS - mP) * sqrt(m) / sdP)),
+              m = m, drug = drug)
+})) %>% group_by(drug) %>% mutate(FDR = p.adjust(p, "BH")) %>% ungroup()
+
+write.csv(score, file.path(OUT_DIR, "kinase_activity_corrected_all.csv"), row.names = FALSE)
+
+## ==================== 4. assemble, collapse families, select ============
+zw   <- score %>% filter(m >= MIN_SUB) %>%
+  pivot_wider(id_cols = kinase, names_from = drug, values_from = z) %>%
+  as.data.frame(); rownames(zw) <- zw$kinase; zw$kinase <- NULL; zw <- zw[, DRUGS]
+fdrw <- score %>% filter(m >= MIN_SUB) %>%
+  pivot_wider(id_cols = kinase, names_from = drug, values_from = FDR) %>%
+  as.data.frame(); rownames(fdrw) <- fdrw$kinase; fdrw$kinase <- NULL; fdrw <- fdrw[, DRUGS]
+zw   <- zw[rowSums(!is.na(zw)) >= MIN_DRUGS, , drop = FALSE]
+fdrw <- fdrw[rownames(zw), , drop = FALSE]
+
+## collapse kinases that share an identical z profile (family aliases)
+keyvec <- apply(round(zw, 3), 1, function(r) paste(ifelse(is.na(r), "NA", r), collapse = "|"))
+reps <- tapply(rownames(zw), keyvec, function(v){
+  v <- sort(v); paste0(paste(head(v, 3), collapse = "/"), if (length(v) > 3) "\u2026" else "")
+})
+first <- tapply(rownames(zw), keyvec, function(v) sort(v)[1])
+zc <- zw[first, , drop = FALSE];  rownames(zc) <- reps[names(first)]
+fc <- fdrw[first, , drop = FALSE]; rownames(fc) <- reps[names(first)]
+ord <- order(rowMeans(abs(zc), na.rm = TRUE), decreasing = TRUE)
+zc <- zc[head(ord, TOP_N), , drop = FALSE]; fc <- fc[rownames(zc), , drop = FALSE]
+
+## ==================== 5. plot (IPA-matched style) =======================
+ord <- order(rowMeans(zc, na.rm = TRUE))                       # order by mean z (vertical gradient, as IPA)
+zc <- zc[ord, , drop = FALSE]; fc <- fc[rownames(zc), , drop = FALSE]
+
+long <- zc %>% tibble::rownames_to_column("kinase") %>%
+  pivot_longer(-kinase, names_to = "drug", values_to = "z") %>%
+  left_join(fc %>% tibble::rownames_to_column("kinase") %>%
+              pivot_longer(-kinase, names_to = "drug", values_to = "FDR"),
+            by = c("kinase","drug")) %>%
+  mutate(drug = factor(drug, levels = DRUGS),
+         kinase = factor(kinase, levels = rownames(zc)),
+         z = pmax(pmin(z, Z_CAP), -Z_CAP))
+
+p <- ggplot(long, aes(drug, kinase, fill = z)) +
+  geom_tile(colour = "white", linewidth = 0.7) +
+  geom_point(data = subset(long, !is.na(FDR) & FDR < 0.05),
+             shape = 21, fill = "white", colour = "grey15", size = 1.3, stroke = 0.4) +
+  scale_fill_gradient2(low = COL_INH, mid = COL_MID, high = COL_ACT, midpoint = 0,
+                       na.value = NA_COL, limits = c(-Z_CAP, Z_CAP), name = "KSEA\nz-score") +
+  coord_equal() +
+  labs(title = "Predicted kinase activity (KSEA)", x = NULL, y = NULL) +
+  theme_ipa
+
+h <- max(6, 0.26 * nrow(zc) + 1.5)
+ggsave(file.path(OUT_DIR, "kinase_activity_corrected.pdf"), p,
+       width = 5, height = h, device = cairo_pdf, limitsize = FALSE)
+ggsave(file.path(OUT_DIR, "kinase_activity_corrected.png"), p, dpi = 600,
+       width = 5, height = h, limitsize = FALSE)
+message("Wrote figures + table to: ", OUT_DIR)
+
+## ==================== 6. over-representation companion ==================
+## Background-independent, survives FDR: this is the statistically strong panel.
+## Shown as proportional circles (size = substrate count, colour = -log10 adjusted p),
+## which suits a one-directional enrichment measure; shares the theme/fonts above.
+ENRICH_FILE <- function(drug) file.path(DOWNLOADS, paste0(drug, "_Kinase_Enrichment_data.xlsx"))
+miss <- DRUGS[!file.exists(vapply(DRUGS, ENRICH_FILE, character(1)))]
+if (length(miss)) {
+  message("Enrichment companion skipped; missing files for: ", paste(miss, collapse = ", "))
+} else {
+  enr <- bind_rows(lapply(DRUGS, function(drug){
+    e <- read_excel(ENRICH_FILE(drug))
+    tibble(kinase = as.character(e$Description), drug = drug,
+           neglog10 = -log10(num(e$`p.adjust`)), count = num(e$Count))
+  }))
+  write.csv(enr, file.path(OUT_DIR, "kinase_enrichment_all.csv"), row.names = FALSE)
+  
+  topk <- enr %>% group_by(kinase) %>%
+    summarise(s = max(neglog10, na.rm = TRUE), .groups = "drop") %>%
+    slice_max(s, n = TOP_N) %>% arrange(s) %>% pull(kinase)   # highest ends up at top
+  
+  pe <- enr %>% filter(kinase %in% topk) %>%
+    mutate(drug = factor(drug, levels = DRUGS),
+           kinase = factor(kinase, levels = topk)) %>%
+    ggplot(aes(drug, kinase, size = count, colour = neglog10)) +
+    geom_point() +
+    scale_colour_gradient(low = "#F6D9BE", high = COL_ACT, name = "-log10\np.adjust") +
+    scale_size_area(max_size = 6, name = "Substrate\ncount") +
+    labs(title = "Kinase substrate over-representation", x = NULL, y = NULL) +
+    theme_ipa +
+    theme(panel.grid.major = element_line(colour = "grey93", linewidth = 0.3))
+  
+  he <- max(6, 0.26 * length(topk) + 1.5)
+  ggsave(file.path(OUT_DIR, "kinase_enrichment_companion.pdf"), pe,
+         width = 5.4, height = he, device = cairo_pdf, limitsize = FALSE)
+  ggsave(file.path(OUT_DIR, "kinase_enrichment_companion.png"), pe, dpi = 600,
+         width = 5.4, height = he, limitsize = FALSE)
+  message("Wrote enrichment companion to: ", OUT_DIR)
+}
